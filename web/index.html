@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>POTD Tracker</title>
+<style>
+:root{color-scheme:light dark;
+  --bg:#f5f5f7;--card:#fff;--text:#1d1d1f;--muted:#6e6e73;--faint:#aeaeb2;--line:rgba(0,0,0,.08);
+  --accent:#0071e3;--accent-soft:rgba(0,113,227,.1);--green:#1a7f37;--green-soft:rgba(52,199,89,.14);
+  --red:#c62828;--red-soft:rgba(198,40,40,.1);--amber:#b25e00;--amber-soft:rgba(178,94,0,.12);--chip:#f0f0f3;
+  --bar:rgba(245,245,247,.72)}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#000;--card:#1c1c1e;--text:#f5f5f7;--muted:#98989d;--faint:#636366;--line:rgba(255,255,255,.1);
+  --accent:#2997ff;--accent-soft:rgba(41,151,255,.16);--green:#30d158;--green-soft:rgba(48,209,88,.16);
+  --red:#ff453a;--red-soft:rgba(255,69,58,.14);--amber:#ffb340;--amber-soft:rgba(255,179,64,.14);--chip:#2c2c2e;
+  --bar:rgba(0,0,0,.72)}}
+*{box-sizing:border-box}
+body{margin:0;font:100%/1.45 system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+button,input{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* top bar: translucent, content scrolls under it */
+.bar{position:sticky;top:0;z-index:5;background:var(--bar);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px) saturate(180%)}
+.bar-in{max-width:60rem;margin:0 auto;padding:.75rem 1.25rem;display:flex;align-items:center;gap:1rem}
+.brand{font-weight:700;letter-spacing:-.01em;font-size:1.0625rem}
+.status{display:flex;align-items:center;gap:.5rem;color:var(--muted);font-size:.8125rem;min-width:0;flex:1}
+.status span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:.5rem;height:.5rem;border-radius:50%;background:var(--green);flex:none}
+.dot.busy{background:var(--accent);animation:pulse 1.2s ease-in-out infinite}
+.dot.warn{background:var(--amber)}
+.dot.bad{background:var(--red)}
+@keyframes pulse{50%{opacity:.35}}
+.btn{border:0;border-radius:999px;padding:.4rem .9rem;background:var(--chip);font-weight:500;font-size:.875rem;cursor:pointer;white-space:nowrap}
+.btn:active{transform:scale(.97);transition:transform 100ms ease-out}
+.btn.primary{background:var(--accent);color:#fff}
+.btn.plain{background:none;color:var(--accent);padding:.4rem .5rem}
+
+main{max-width:60rem;margin:0 auto;padding:1rem 1.25rem 5rem}
+.banner{border-radius:14px;padding:1rem 1.125rem;margin:.5rem 0 0;display:flex;gap:1rem;align-items:center;flex-wrap:wrap;background:var(--amber-soft)}
+.banner p{margin:0;flex:1;min-width:14rem}
+.banner.bad{background:var(--red-soft)}
+h2{font-size:1.25rem;letter-spacing:-.01em;margin:1.5rem 0 .25rem;display:flex;align-items:baseline;gap:.5rem}
+h2 small{font-size:.875rem;color:var(--muted);font-weight:500}
+h3{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:1.25rem 0 .5rem}
+
+.list{background:var(--card);border-radius:16px;overflow:hidden}
+.bet{display:grid;grid-template-columns:2.75rem 6.25rem minmax(0,1fr) 4.5rem 7.5rem;gap:.875rem;align-items:center;
+  padding:.9rem 1.125rem .9rem .75rem;border-top:1px solid var(--line);transition:background-color 180ms ease}
+.bet:first-child{border-top:0}
+.bet.placed{background:var(--green-soft)}
+.bet.placed .units b{color:var(--green)}
+.tick{width:2.75rem;height:2.75rem;display:grid;place-items:center;cursor:pointer;border-radius:50%}
+.tick input{appearance:none;width:1.5rem;height:1.5rem;border-radius:50%;border:2px solid var(--faint);margin:0;cursor:pointer;
+  display:grid;place-items:center;transition:background-color 120ms ease,border-color 120ms ease}
+.tick input:checked{background:var(--green);border-color:var(--green)}
+.tick input:checked::after{content:"";width:.375rem;height:.7rem;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
+.tick input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.when{white-space:nowrap;font-variant-numeric:tabular-nums}
+.when b{display:block;font-size:1.0625rem;letter-spacing:-.01em}
+.when span{display:block;font-size:.8125rem;color:var(--muted)}
+.when span.soon{color:var(--amber);font-weight:500}
+.what{min-width:0}
+.pick{font-weight:600;font-size:1rem;overflow-wrap:anywhere;letter-spacing:-.005em}
+.meta{color:var(--muted);font-size:.8125rem;margin-top:.125rem}
+.who{margin-top:.375rem;display:flex;flex-wrap:wrap;gap:.25rem .75rem;font-size:.8125rem}
+.who .m{color:var(--muted)}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.num b{display:block;font-size:1.125rem;letter-spacing:-.01em}
+.num span{display:block;font-size:.75rem;color:var(--muted)}
+.units b{font-size:1.375rem}
+.chip{display:inline-block;font-size:.6875rem;font-weight:600;padding:.0625rem .45rem;border-radius:999px;background:var(--chip);color:var(--muted);margin-left:.25rem;vertical-align:1px;white-space:nowrap}
+.chip.new{background:var(--accent);color:#fff}
+.chip.warn{background:var(--amber-soft);color:var(--amber)}
+.chip.multi{background:var(--accent-soft);color:var(--accent)}
+.chip.won{background:var(--green-soft);color:var(--green)}
+.chip.lost{background:var(--red-soft);color:var(--red)}
+.empty{color:var(--muted);padding:1.25rem 1.125rem}
+
+details>summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:500;margin:2rem 0 .75rem}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"›";display:inline-block;margin-right:.4rem;transition:transform 150ms ease}
+details[open]>summary::before{transform:rotate(90deg)}
+table{width:100%;border-collapse:collapse;font-size:.8125rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:.5rem 1.125rem;border-top:1px solid var(--line)}
+th{color:var(--muted);font-weight:500;border-top:0}
+
+.btn.icon{width:2rem;height:2rem;padding:0;display:grid;place-items:center}
+.btn.icon svg{width:1.125rem;height:1.125rem}
+
+/* settings modal */
+dialog{border:0;padding:0;border-radius:18px;background:var(--card);color:var(--text);width:min(26rem,calc(100vw - 2rem));
+  box-shadow:0 24px 64px rgba(0,0,0,.28)}
+dialog::backdrop{background:rgba(0,0,0,.32)}
+@media (prefers-color-scheme:dark){dialog::backdrop{background:rgba(0,0,0,.6)}dialog{box-shadow:0 0 0 1px rgba(255,255,255,.08),0 24px 64px rgba(0,0,0,.5)}}
+dialog[open]{animation:dlg-in 240ms cubic-bezier(.2,.9,.3,1)}
+dialog[open]::backdrop{animation:fade-in 200ms ease}
+dialog.closing{animation:dlg-out 160ms ease-in forwards}
+dialog.closing::backdrop{animation:fade-out 160ms ease-in forwards}
+@keyframes dlg-in{from{opacity:0;transform:scale(.96)}}
+@keyframes dlg-out{to{opacity:0;transform:scale(.96)}}
+@keyframes fade-in{from{opacity:0}}
+@keyframes fade-out{to{opacity:0}}
+dialog.wide{width:min(58rem,calc(100vw - 2rem))}
+.tracked-body{overflow-x:auto;max-height:70vh;overflow-y:auto;padding:.5rem 0 .75rem}
+.dlg-head{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.25rem .25rem}
+.dlg-head h2{margin:0;font-size:1.125rem}
+.settings{display:grid;gap:1.125rem;padding:1rem 1.25rem 1.25rem}
+.settings label{display:block;font-size:.875rem;font-weight:500}
+.settings small{display:block;color:var(--muted);font-size:.75rem;font-weight:400;margin-top:.25rem}
+.settings input{display:block;width:100%;margin-top:.4rem;padding:.55rem .7rem;border-radius:10px;border:1px solid var(--line);background:var(--bg);font-variant-numeric:tabular-nums}
+.settings input:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent}
+footer{color:var(--muted);font-size:.75rem;margin-top:3rem}
+
+@media (max-width:46rem){
+  .bet{grid-template-columns:2.75rem minmax(0,1fr) auto;grid-template-areas:"t w u" "t p p" "t o o";row-gap:.5rem}
+  .bet .tick{grid-area:t;align-self:start}.bet .when{grid-area:w}.bet .what{grid-area:p}
+  .bet .units{grid-area:u}.bet .odds{grid-area:o;text-align:left;display:flex;gap:.75rem;align-items:baseline}
+  .bet .odds b,.bet .odds span{display:inline}
+  .when b,.when span{display:inline;margin-right:.5rem}
+  .status span{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (prefers-reduced-transparency:reduce){.bar{background:var(--bg);backdrop-filter:none;-webkit-backdrop-filter:none}}
+</style>
+</head>
+<body>
+<header class="bar"><div class="bar-in">
+  <div class="brand">POTD Tracker</div>
+  <div class="status"><i class="dot" id="dot"></i><span id="statusText">Connecting…</span></div>
+  <button class="btn" id="checkBtn">Check now</button>
+  <button class="btn icon" id="trackedBtn" aria-label="Tracked handicappers" title="Tracked handicappers" aria-haspopup="dialog">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+    </svg>
+  </button>
+  <button class="btn icon" id="settingsBtn" aria-label="Settings" title="Settings" aria-haspopup="dialog">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
+  <button class="btn plain" id="updateBtn" title="Check for a newer version">Get updates</button>
+  <button class="btn plain" id="quitBtn" title="Stop tracking and close the hidden Chrome">Quit</button>
+</div></header>
+
+<dialog id="settingsDlg" aria-labelledby="settingsTitle">
+  <div class="dlg-head"><h2 id="settingsTitle">Settings</h2><button class="btn plain" id="settingsDone">Done</button></div>
+  <form class="settings" id="settings" autocomplete="off" method="dialog">
+    <label>Unit multiplier<input name="multiplier" type="number" min="0.1" step="0.1">
+      <small>Units shown = handicapper’s units × this. If several handicappers posted the same bet, the largest stake counts.</small></label>
+    <label>Odds tolerance %<input name="tolerancePct" type="number" min="0" max="50" step="0.5">
+      <small>“Min” odds = target odds minus this percentage: the lowest price still worth taking.</small></label>
+    <label>Check every (minutes)<input name="pollMinutes" type="number" min="2" step="1">
+      <small>How often the leaderboards are checked for new picks. Minimum 2.</small></label>
+  </form>
+</dialog>
+
+<dialog id="trackedDlg" class="wide" aria-labelledby="trackedTitle">
+  <div class="dlg-head"><h2 id="trackedTitle">Tracked handicappers <small id="trackedCount"></small></h2><button class="btn plain" id="trackedDone">Done</button></div>
+  <div class="tracked-body" id="tracked"></div>
+</dialog>
+
+<main>
+  <div id="banner"></div>
+
+  <h2>Bets to place <small id="todoCount"></small></h2>
+  <div id="todo"></div>
+
+  <footer>Data from potd.lol, read through a minimized Chrome window. Mirrors other people’s picks. Not betting advice; only stake what you can afford to lose.</footer>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let data = null, lastJson = "", busy = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+const fmtUnits = v => String(Number(Number(v).toFixed(2)));   // 2.00 -> "2", 1.50 -> "1.5"
+const hhmm = d => d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+
+function dayLabel(d) {
+  const t = new Date(); t.setHours(0,0,0,0);
+  const x = new Date(d); x.setHours(0,0,0,0);
+  const diff = Math.round((x - t) / 864e5);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff === -1) return "Yesterday";
+  return d.toLocaleDateString(undefined, {weekday: "long", day: "numeric", month: "short"});
+}
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  return Math.round(s / 3600) + " h ago";
+}
+// "in 45m", "in 9h 5m", "in 3d 4h", "started"
+function countdown(d) {
+  const m = Math.round((d - Date.now()) / 6e4);
+  if (m <= 0) return "started";
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `in ${h}h ${m % 60}m`;
+  return `in ${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function betRow(b) {
+  const k = b.kickoff ? new Date(b.kickoff) : null;
+  const cd = k ? countdown(k) : "";
+  const soon = k && k - Date.now() > 0 && k - Date.now() < 3600e3;
+  const badges = [
+    b.isNew ? '<span class="chip new">NEW</span>' : "",
+    b.handicappers.length > 1 ? `<span class="chip multi">${b.handicappers.length} handicappers</span>` : "",
+    b.unreviewed ? '<span class="chip warn" title="Not yet reviewed by potd.lol admins; may be removed">Unreviewed</span>' : "",
+    b.result ? `<span class="chip ${b.result === "won" ? "won" : b.result === "lost" ? "lost" : ""}">${b.result.toUpperCase()}</span>` : "",
+  ].join("");
+  const who = b.handicappers.map(h =>
+    `<span><a href="${esc(h.profile)}" target="_blank" rel="noopener">${esc(h.name)}</a>
+     <span class="m">${h.rating ? "★ " + esc(h.rating) : ""}${h.roi ? " · ROI " + esc(h.roi) + "%" : ""}${h.lists.length ? " · " + esc(h.lists.join(", ")) : ""}${b.handicappers.length > 1 ? " · " + esc(fmtUnits(h.units)) + "u @ " + esc(h.odds) : ""}</span></span>`).join("");
+  const us = b.targetUs ? (Number(b.targetUs) > 0 ? "+" : "") + Number(b.targetUs).toFixed(0) : "";
+  return `<div class="bet ${b.placed ? "placed" : ""}" data-key="${esc(b.key)}">
+    <label class="tick" title="${b.placed ? "Placed. Click to undo" : "Tick when placed"}"><input type="checkbox" ${b.placed ? "checked" : ""} aria-label="Placed: ${esc(b.pick)}"></label>
+    <div class="when"><b>${k ? hhmm(k) : "–"}</b><span class="${soon ? "soon" : ""}">${esc(cd)}</span></div>
+    <div class="what"><div class="pick">${esc(b.pick)}</div>
+      <div class="meta">${esc(b.league)}${badges}</div>
+      <div class="who">${who}</div></div>
+    <div class="num units"><b>${fmtUnits(b.units)}u</b><span>units</span></div>
+    <div class="num odds"><b>${b.targetOdds ? "@ " + Number(b.targetOdds).toFixed(2) : "–"}</b><span>${b.minOdds ? "min " + Number(b.minOdds).toFixed(2) : ""}${us ? " · " + us : ""}</span></div>
+  </div>`;
+}
+
+function groupByDay(bets) {
+  const out = [];
+  let cur = null;
+  for (const b of bets) {
+    const label = b.kickoff ? dayLabel(new Date(b.kickoff)) : "No kickoff time";
+    if (!cur || cur.label !== label) out.push(cur = {label, bets: []});
+    cur.bets.push(b);
+  }
+  return out;
+}
+
+function renderBets() {
+  const main = data.bets;
+  const left = main.filter(b => !b.placed).length;
+
+  $("todo").innerHTML = main.length
+    ? groupByDay(main).map(g => `<h3>${esc(g.label)}</h3><div class="list">${g.bets.map(betRow).join("")}</div>`).join("")
+    : `<div class="list"><div class="empty">${["checking", "starting"].includes(data.status.phase) ? "Looking for picks…" : "Nothing to place right now. New picks show up here automatically."}</div></div>`;
+  $("todoCount").textContent = main.length ? (left ? `${left} left` : "all placed") : "";
+
+  const newCount = main.filter(b => b.isNew).length;
+  document.title = newCount ? `(${newCount}) POTD Tracker` : "POTD Tracker";
+
+  $("tracked").innerHTML = `<table><tr><th>Handicapper</th><th>Lists</th><th>Rating</th><th>ROI</th><th>Units</th><th>Picks</th><th>Last 10</th><th>Last pick</th></tr>${
+    data.tracked.map(t => `<tr><td><a href="${esc(t.profile)}" target="_blank" rel="noopener">${esc(t.name)}</a></td><td>${esc(t.lists.join(", "))}</td><td>${esc(t.rating)}</td><td>${esc(t.roi)}%</td><td>${esc(t.units)}</td><td>${esc(t.entries)}</td><td>${esc(t.lastTen)}</td><td>${t.lastPickAt ? esc(ago(t.lastPickAt)) : "–"}</td></tr>`).join("")}</table>`;
+  $("trackedCount").textContent = data.tracked.length ? `(${data.tracked.length})` : "";
+}
+
+function renderStatus() {
+  const st = data.status;
+  $("dot").className = "dot " + ({checking: "busy", starting: "busy", login: "warn", login_required: "bad", attention: "warn", error: "bad"}[st.phase] || "");
+  let text = st.message;
+  if (st.phase === "checking" && st.progress) text = `${st.message} (${st.progress[0]}/${st.progress[1]})`;
+  if (st.phase === "idle") text = `Watching · checked ${ago(st.lastCheck)}${st.nextCheck ? " · next " + hhmm(new Date(st.nextCheck)) : ""}`;
+  $("statusText").textContent = text;
+  $("checkBtn").disabled = st.phase === "checking";
+
+  let b = "";
+  if (st.phase === "login_required")
+    b = `<div class="banner bad"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="login">Sign in</button></div>`;
+  else if (st.phase === "login")
+    b = `<div class="banner"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="login_done">I’m signed in</button><button class="btn" data-cmd="show">Show Chrome</button></div>`;
+  else if (st.phase === "attention")
+    b = `<div class="banner"><p>${esc(st.message)}</p><button class="btn" data-cmd="show">Show browser</button><button class="btn" data-cmd="hide">Hide it</button><button class="btn primary" data-cmd="check">Retry</button></div>`;
+  else if (st.phase === "error")
+    b = `<div class="banner bad"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="check">Retry now</button></div>`;
+  if ($("banner").innerHTML !== b) $("banner").innerHTML = b;
+}
+
+function fillSettings(force) {
+  if (!force && $("settingsDlg").open) return;  // never overwrite what the user is editing
+  const f = $("settings");
+  for (const [k, v] of Object.entries(data.settings))
+    if (f.elements[k]) f.elements[k].value = v;
+}
+
+function apply(next) {
+  data = next;
+  renderStatus();
+  const j = JSON.stringify([data.bets, data.tracked, data.settings, data.status.phase]);
+  if (j !== lastJson) { lastJson = j; renderBets(); }
+  fillSettings();
+}
+
+async function poll() {
+  if (busy) return;
+  try { apply(await api("/api/state")); }
+  catch { $("statusText").textContent = "Tracker not running. Start it with POTD Tracker.command"; $("dot").className = "dot bad"; }
+}
+
+// tick: turn green instantly, then save
+document.addEventListener("change", async e => {
+  if (!e.target.matches(".tick input")) return;
+  const row = e.target.closest(".bet");
+  const placed = e.target.checked;
+  row.classList.toggle("placed", placed);
+  busy = true;
+  try { apply(await api("/api/placed", {key: row.dataset.key, placed})); } finally { busy = false; }
+});
+
+document.addEventListener("click", async e => {
+  const btn = e.target.closest("[data-cmd]");
+  if (!btn) return;
+  apply(await api("/api/" + btn.dataset.cmd, {}));
+});
+$("checkBtn").onclick = async () => { $("checkBtn").disabled = true; apply(await api("/api/check", {})); };
+$("updateBtn").onclick = async () => {
+  const b = $("updateBtn"), reset = () => setTimeout(() => { b.textContent = "Get updates"; b.disabled = false; }, 4000);
+  b.disabled = true; b.textContent = "Checking…";
+  try {
+    let r = await api("/api/update");
+    if (r.available && r.canApply && confirm(`Update to v${r.latest}? The app restarts.`)) {
+      b.textContent = "Updating…";
+      r = await api("/api/update_apply", {});
+      if (r.restarting) { document.body.innerHTML = "<main><h2>Updating…</h2><p class='meta'>Reloading in a few seconds.</p></main>"; setTimeout(() => location.reload(), 7000); return; }
+    }
+    b.textContent = r.error ? r.error : r.available ? (r.canApply ? "Update cancelled" : `v${r.latest} available`) : `Up to date (v${r.current})`;
+  } catch { b.textContent = "Update failed"; }
+  reset();
+};
+$("quitBtn").onclick = async () => {
+  if (!confirm("Stop tracking? The hidden Chrome window closes too.")) return;
+  await api("/api/quit", {}).catch(() => {});
+  document.body.innerHTML = '<main><h2>POTD Tracker stopped.</h2><p class="meta">Start it again with the “POTD Tracker.command” file.</p></main>';
+};
+
+// settings modal: scale/fade in, same path out; Esc, Done or a click outside closes it
+function wireDialog(dlg, openBtn, doneBtn, onOpen) {
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+openBtn.onclick = () => { if (onOpen) onOpen(); dlg.showModal(); };
+function closeDlg() {
+  if (!dlg.open || dlg.classList.contains("closing")) return;
+  if (reduceMotion.matches) return dlg.close();
+  dlg.classList.add("closing");
+  dlg.addEventListener("animationend", () => { dlg.classList.remove("closing"); dlg.close(); }, {once: true});
+}
+doneBtn.onclick = closeDlg;
+dlg.addEventListener("cancel", e => { e.preventDefault(); closeDlg(); });
+dlg.addEventListener("click", e => { if (e.target === dlg) closeDlg(); });
+return closeDlg;
+}
+const dlg = $("settingsDlg");
+const closeSettings = wireDialog(dlg, $("settingsBtn"), $("settingsDone"), () => fillSettings(true));
+wireDialog($("trackedDlg"), $("trackedBtn"), $("trackedDone"));
+$("settings").addEventListener("submit", e => { e.preventDefault(); closeSettings(); });
+
+let saveTimer;
+$("settings").addEventListener("input", () => {
+  const body = {};  // capture now, save shortly after typing stops
+  for (const el of $("settings").elements) if (el.name && el.value !== "") body[el.name] = Number(el.value);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => apply(await api("/api/settings", body)), 400);
+});
+
+poll();
+setInterval(poll, 3000);
+// keep countdowns fresh
+setInterval(() => { if (data) { renderStatus(); lastJson = ""; apply(data); } }, 30000);
+</script>
+</body>
+</html>

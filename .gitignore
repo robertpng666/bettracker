@@ -1,0 +1,8 @@
+.potd-chrome/
+data/
+reports/
+build/
+dist/
+*.spec
+__pycache__/
+.claude/
