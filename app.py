@@ -30,7 +30,6 @@ from potd import LoginRequired, NoData, to_dt
 HOST, PORT = "127.0.0.1", 8765
 HERE = Path(__file__).resolve().parent
 RES = Path(getattr(sys, "_MEIPASS", HERE))  # bundled files when packaged
-SESSION_FILE = potd.DATA_DIR / "data" / "session.json"
 STATE_FILE = potd.DATA_DIR / "data" / "state.json"
 INDEX_HTML = RES / "web" / "index.html"
 
@@ -83,19 +82,13 @@ class Tracker(threading.Thread):
         super().__init__(daemon=True)
         self.lock = threading.RLock()
         self.cmds = queue.Queue()
-        self.signin = None
-        self.cookie = None
+        self.chrome = potd.HiddenChrome()
         self.state = self._load()
         self.status = {"phase": "starting", "message": "Starting…", "lastCheck": None,
                        "nextCheck": None, "progress": None}
         self.next_due = time.time()
         self.stopped = threading.Event()
         self.auto_prompted = False  # open the sign-in window by itself once per run
-        if SESSION_FILE.exists():
-            try:
-                self.cookie = json.loads(SESSION_FILE.read_text()).get("potd")
-            except Exception:
-                pass
 
     # ---------- persistence
 
@@ -136,26 +129,24 @@ class Tracker(threading.Thread):
                     self.start_signin()
                     continue
                 if cmd == "login_cancel":
-                    if self.signin:
-                        self.signin.cancel()
-                    continue
-                if cmd == "signed_in":
-                    self.set_status(phase="checking", message="Signed in. Checking leaderboards…")
-                    self.next_due = 0
-                if cmd == "signin_failed":
+                    self.chrome.hide()
                     self.set_status(phase="login_required", message="Sign in to your potd.lol account to start tracking.")
                     continue
-                # while the sign-in window is open or needed, only check when asked
-                waiting = self.status["phase"] in ("login", "login_required")
-                if cmd == "check" or (not waiting and time.time() >= self.next_due):
+                if self.status["phase"] == "login":
+                    # waiting for the user: finish as soon as the browser is signed in
+                    if self.chrome.signed_in():
+                        self.chrome.hide()
+                        self.set_status(phase="checking", message="Signed in. Checking leaderboards…")
+                        self.check()
+                    continue
+                if cmd == "check" or (self.status["phase"] != "login_required" and time.time() >= self.next_due):
                     self.check()
             except Exception as ex:  # keep the loop alive whatever happens
                 potd.log("tracker error:", repr(ex))
+                self.chrome.close()
                 self.set_status(phase="error", message=f"Something went wrong: {ex}. Retrying soon.")
                 self._schedule()
-        if self.signin:
-            self.signin.cancel()
-            self.signin.join(timeout=10)
+        self.chrome.close()
         self.stopped.set()
 
     def _schedule(self):
@@ -164,28 +155,21 @@ class Tracker(threading.Thread):
         self.set_status(nextCheck=iso(now_utc() + timedelta(minutes=minutes)))
 
     def start_signin(self):
-        if self.signin and self.signin.is_alive():
-            return
         self.set_status(phase="login", progress=None,
                         message="Sign in to potd.lol in the Chrome window that just opened.")
-
-        def done(cookie):
-            if cookie:
-                self.cookie = cookie
-                SESSION_FILE.parent.mkdir(exist_ok=True)
-                SESSION_FILE.write_text(json.dumps({"potd": cookie}))
-                self.cmds.put("signed_in")
-            else:
-                self.cmds.put("signin_failed")
-        self.signin = potd.SignIn(done)
-        self.signin.start()
+        self.chrome.show(potd.BASE + "/sign-in")
 
     def check(self):
         self.set_status(phase="checking", message="Checking leaderboards…", progress=None)
+        page = self.chrome.ensure()
         try:
-            if not self.cookie:
-                raise LoginRequired()
-            users = potd.fetch_leaderboards(self.cookie)
+            try:
+                users = potd.fetch_leaderboards(page)
+            except NoData:
+                # a signed-out page may simply not load its data: ask the site if we are signed in
+                if not self.chrome.signed_in():
+                    raise LoginRequired()
+                raise
         except LoginRequired:
             self.set_status(phase="login_required", progress=None,
                             message="Sign in to your potd.lol account to start tracking.")
@@ -198,7 +182,7 @@ class Tracker(threading.Thread):
             return
         except NoData as ex:
             self.set_status(phase="attention", progress=None,
-                            message="potd.lol didn’t answer. Retrying soon.")
+                            message=f"potd.lol didn’t load. {str(ex)[:240]}")
             potd.log("no data:", ex)
             self._schedule()
             return
@@ -222,45 +206,38 @@ class Tracker(threading.Thread):
 
         new_picks = []
         failed = []
-        chrome = potd.HiddenChrome(self.cookie) if to_visit else None
-        try:
-            page = chrome.ensure() if chrome else None
-            for i, u in enumerate(to_visit, 1):
-                if self.stopped.is_set() or not self.cmds.empty():
-                    break  # pick up user commands; the rest is checked next round
-                self.set_status(message=f"Reading {u.get('displayName') or u['username']}…", progress=[i, len(to_visit)])
-                time.sleep(random.uniform(*PAUSE_RANGE))
-                try:
-                    fetched = potd.fetch_picks(page, u)
-                except NoData as ex:
-                    potd.log("skip", u["username"], ex)
-                    failed.append(str(ex))
-                    continue
-                except LoginRequired:
-                    self.cookie = None
-                    self.set_status(phase="login_required", progress=None,
-                                    message="Your potd.lol sign-in expired. Sign in again.")
-                    self.auto_prompted = False
-                    return
-                with self.lock:
-                    first_scan = u["uniqueId"] not in self.state["users"]
-                    for p in fetched:
-                        prev = self.state["picks"].get(p["id"])
-                        if prev:
-                            p["firstSeen"] = prev["firstSeen"]
-                            p["live"] = prev.get("live", False)
-                        else:
-                            p["firstSeen"] = iso(now_utc())
-                            p["live"] = not first_scan
-                            if p["live"] and p["status"] in ("pending", "unreviewed"):
-                                new_picks.append(p)
-                        self.state["picks"][p["id"]] = p
-                    self.state["users"][u["uniqueId"]] = {"lastPickAt": u.get("lastPickAt"),
-                                                          "lastVisited": iso(now_utc())}
-                self.save()
-        finally:
-            if chrome:
-                chrome.close()
+        for i, u in enumerate(to_visit, 1):
+            if self.stopped.is_set() or not self.cmds.empty():
+                break  # pick up user commands; the rest is checked next round
+            self.set_status(message=f"Reading {u.get('displayName') or u['username']}…", progress=[i, len(to_visit)])
+            time.sleep(random.uniform(*PAUSE_RANGE))
+            try:
+                fetched = potd.fetch_picks(page, u)
+            except NoData as ex:
+                potd.log("skip", u["username"], ex)
+                failed.append(str(ex))
+                continue
+            except LoginRequired:
+                self.set_status(phase="login_required", progress=None,
+                                message="Your potd.lol sign-in expired. Sign in again.")
+                self.auto_prompted = False
+                return
+            with self.lock:
+                first_scan = u["uniqueId"] not in self.state["users"]
+                for p in fetched:
+                    prev = self.state["picks"].get(p["id"])
+                    if prev:
+                        p["firstSeen"] = prev["firstSeen"]
+                        p["live"] = prev.get("live", False)
+                    else:
+                        p["firstSeen"] = iso(now_utc())
+                        p["live"] = not first_scan
+                        if p["live"] and p["status"] in ("pending", "unreviewed"):
+                            new_picks.append(p)
+                    self.state["picks"][p["id"]] = p
+                self.state["users"][u["uniqueId"]] = {"lastPickAt": u.get("lastPickAt"),
+                                                      "lastVisited": iso(now_utc())}
+            self.save()
 
         self.save()
         if failed and len(failed) == len(to_visit):

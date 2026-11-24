@@ -1,22 +1,25 @@
 """
-Core POTD.LOL access: readers for the leaderboard and handicapper data, plus
-the sign-in helper.
+Core POTD.LOL access: a hidden Chrome session plus readers for the leaderboard
+and handicapper pages.
 
-Leaderboards are read over plain HTTPS with the user's own session cookie. Handicapper
-picks are read through a minimized Chrome that only runs while a check needs it. Chrome
-is opened visibly for signing in, because the sign-in page has a human check.
+The site only serves its data to its own web app in a real, signed-in browser.
+So we drive the user's installed Google Chrome with a dedicated profile
+(.potd-chrome), open the same pages a person would, and read the data those
+pages load. The Chrome window is kept minimized; it is only shown when the
+user has to sign in.
+
+All functions here must be called from one thread (Playwright sync API).
 """
-import json
 import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
-import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
 from playwright.sync_api import sync_playwright
 
 BASE = "https://www.potd.lol"
@@ -31,16 +34,14 @@ if FROZEN and IS_WIN:
 else:
     DATA_DIR = HERE
 LOG_FILE = DATA_DIR / "data" / "tracker.log"
-CHROME_PROFILE = DATA_DIR / ".potd-chrome"          # sign-in window (deleted after)
-BG_PROFILE = DATA_DIR / ".potd-chrome-bg"          # hidden Chrome that reads picks
-BG_PORT = 9334
+CHROME_PROFILE = DATA_DIR / ".potd-chrome"
 CHROME_APP = "Google Chrome"
 DEBUG_PORT = 9333
 
 LEADERBOARDS = [
-    # (label, API query)
-    ("Rating", "limit=25&metric=rating&minPicks=8"),
-    ("ROI 30d", "limit=25&metric=roi&days=30&minPicks=8"),
+    # (label, page url, metric, days)
+    ("Rating", BASE + "/leaderboards", "rating", None),
+    ("ROI 30d", BASE + "/leaderboards?limit=25&metric=roi&range=30", "roi", "30"),
 ]
 
 
@@ -74,9 +75,9 @@ def ident(u):
 
 # ---------------------------------------------------------------- Chrome
 
-def _port_open(port=DEBUG_PORT):
+def _port_open():
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1)
+        urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json/version", timeout=1)
         return True
     except Exception:
         return False
@@ -97,76 +98,10 @@ def _chrome_exe():
     raise RuntimeError("Google Chrome is not installed. Install it from google.com/chrome and start the tracker again.")
 
 
-class SignIn(threading.Thread):
-    """Opens a normal, visible Chrome on the potd.lol sign-in page (the site's
-    human check only works in a real browser), waits until the user is signed
-    in, hands the session cookie to on_done(cookie) and closes Chrome.
-    on_done(None) if the window was closed first or cancel() was called."""
-
-    def __init__(self, on_done):
-        super().__init__(daemon=True)
-        self.on_done = on_done
-        self._cancel = threading.Event()
-
-    def cancel(self):
-        self._cancel.set()
-
-    def run(self):
-        cookie = None
-        pw = None
-        try:
-            shutil.rmtree(CHROME_PROFILE, ignore_errors=True)  # fresh: any cookie we see is a new sign-in
-            flags = [f"--user-data-dir={CHROME_PROFILE}", f"--remote-debugging-port={DEBUG_PORT}",
-                     "--no-first-run", "--no-default-browser-check",
-                     "--window-size=1000,800", BASE + "/sign-in"]
-            if IS_MAC:
-                subprocess.run(["open", "-n", "-a", CHROME_APP, "--args", *flags], check=True)
-            else:
-                subprocess.Popen([_chrome_exe(), *flags])
-            for _ in range(60):
-                if _port_open():
-                    break
-                time.sleep(0.5)
-            else:
-                raise RuntimeError("Chrome did not start")
-            pw = sync_playwright().start()
-            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}", timeout=20000)
-            while not self._cancel.is_set() and browser.is_connected() and _port_open():
-                try:
-                    for c in browser.contexts[0].cookies(BASE):
-                        if c["name"] == SESSION_COOKIE and is_signed_in(c["value"]):
-                            cookie = c["value"]
-                except Exception:
-                    pass
-                if cookie:
-                    break
-                time.sleep(1)
-            if browser.is_connected():
-                try:
-                    browser.new_browser_cdp_session().send("Browser.close")
-                except Exception:
-                    pass
-        except Exception as ex:
-            log("sign-in error:", repr(ex))
-        finally:
-            try:
-                if pw:
-                    pw.stop()
-            except Exception:
-                pass
-            shutil.rmtree(CHROME_PROFILE, ignore_errors=True)
-            self.on_done(cookie)
-
-
-# ---------------------------------------------------------------- hidden Chrome (picks only)
-# Handicapper pages only return their picks to potd.lol's own web page, so they
-# are read by loading that page in a minimized Chrome signed in with the user's cookie.
-
 class HiddenChrome:
     """One Chrome instance with the POTD profile, kept minimized."""
 
-    def __init__(self, cookie=None):
-        self.cookie = cookie
+    def __init__(self):
         self._pw = None
         self._browser = None
         self.page = None
@@ -176,12 +111,12 @@ class HiddenChrome:
         if self.page and not self.page.is_closed() and self._browser.is_connected():
             return self.page
         self._disconnect()
-        if not _port_open(BG_PORT):
+        if not _port_open():
             # `open -g` starts Chrome without bringing it to the front;
             # the window starts off-screen and is minimized right after.
             flags = [
-                f"--user-data-dir={BG_PROFILE}",
-                f"--remote-debugging-port={BG_PORT}",
+                f"--user-data-dir={CHROME_PROFILE}",
+                f"--remote-debugging-port={DEBUG_PORT}",
                 "--no-first-run", "--no-default-browser-check",
                 "--window-position=-3000,-3000", "--window-size=1100,850",
                 # keep pages working normally while minimized
@@ -195,7 +130,7 @@ class HiddenChrome:
             else:
                 subprocess.Popen([_chrome_exe(), *flags])
             for _ in range(60):
-                if _port_open(BG_PORT):
+                if _port_open():
                     break
                 time.sleep(0.5)
             else:
@@ -203,14 +138,19 @@ class HiddenChrome:
             self.launched_by_us = True
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.connect_over_cdp(
-            f"http://127.0.0.1:{BG_PORT}", timeout=20000)
+            f"http://127.0.0.1:{DEBUG_PORT}", timeout=20000)
         ctx = self._browser.contexts[0]
-        if self.cookie:
-            ctx.add_cookies([{"name": SESSION_COOKIE, "value": self.cookie, "domain": "www.potd.lol",
-                              "path": "/", "secure": True, "httpOnly": True}])
         self.page = ctx.pages[0] if ctx.pages else ctx.new_page()
         self.hide()
         return self.page
+
+    def signed_in(self):
+        """True when the page's own session is signed in (asked from inside the browser)."""
+        try:
+            return bool(self.page.evaluate(
+                "fetch('/api/check-sign-in',{credentials:'include'}).then(r=>r.json()).then(j=>!!j.loggedIn)"))
+        except Exception:
+            return False
 
     def _window(self):
         cdp = self.page.context.new_cdp_session(self.page)
@@ -219,6 +159,18 @@ class HiddenChrome:
     def hide(self):
         cdp, wid = self._window()
         cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {"windowState": "minimized"}})
+
+    def show(self, url=None):
+        self.ensure()
+        cdp, wid = self._window()
+        cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {"windowState": "normal"}})
+        cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {
+            "left": 120, "top": 80, "width": 1100, "height": 850}})
+        if url:
+            self.page.goto(url, wait_until="commit")
+        self.page.bring_to_front()
+        if IS_MAC:
+            subprocess.run(["osascript", "-e", f'tell application "{CHROME_APP}" to activate'], check=False)
 
     def close(self):
         if self._browser and self._browser.is_connected():
@@ -276,46 +228,22 @@ def load_page_data(page, url, matchers, timeout=30):
         page.remove_listener("response", on_response)
 
 
-# ---------------------------------------------------------------- HTTP
-
-SESSION_COOKIE = "_potd"
-# A browser-like UA with a non-browser TLS fingerprint trips Cloudflare's challenge; a plain one passes.
-UA = "Mozilla/5.0"
-
-
-def api_get(path, cookie):
-    """GET https://www.potd.lol/api<path> with the user's session. -> (status, json|None)"""
-    req = urllib.request.Request(BASE + "/api" + path, headers={
-        "User-Agent": UA, "Accept": "application/json",
-        **({"Cookie": f"{SESSION_COOKIE}={cookie}"} if cookie else {})})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            status, raw = r.status, r.read()
-    except urllib.error.HTTPError as e:
-        status, raw = e.code, b""
-    except Exception as e:
-        raise NoData(f"{path}: {e}")
-    try:
-        return status, json.loads(raw)
-    except Exception:
-        return status, None
-
-
-def is_signed_in(cookie):
-    try:
-        status, body = api_get("/check-sign-in", cookie)
-    except NoData:
-        return False
-    return status == 200 and isinstance(body, dict) and bool(body.get("loggedIn"))
-
-
 # ---------------------------------------------------------------- readers
 
-def fetch_leaderboards(cookie):
+def _lb_matcher(metric, days):
+    def fn(u):
+        if "/api/api/leaderboards" not in u:
+            return False
+        q = parse_qs(urlparse(u).query)
+        return q.get("metric", [None])[0] == metric and q.get("days", [None])[0] == days
+    return fn
+
+
+def fetch_leaderboards(page):
     """Union of both top-25 lists, keyed by handicapper uniqueId."""
     users = {}
-    for label, query in LEADERBOARDS:
-        status, rows = api_get("/api/leaderboards?" + query, cookie)
+    for label, url, metric, days in LEADERBOARDS:
+        status, rows = load_page_data(page, url, {"lb": _lb_matcher(metric, days)})["lb"]
         if status == 401:
             raise LoginRequired()
         if status != 200 or not isinstance(rows, list):
