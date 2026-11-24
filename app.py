@@ -5,7 +5,7 @@ POTD Tracker: local web app.
     python3 app.py          # starts the tracker and opens http://localhost:8765
 
 While it runs, a background thread checks the potd.lol leaderboards every few
-minutes (Chrome stays minimized), opens a handicapper profile only when they
+minutes, opens a handicapper profile only when they
 posted something new, and the page lists the bets to place: units,
 target odds and the lowest odds still worth taking. Ticked bets turn green.
 """
@@ -30,6 +30,7 @@ from potd import LoginRequired, NoData, to_dt
 HOST, PORT = "127.0.0.1", 8765
 HERE = Path(__file__).resolve().parent
 RES = Path(getattr(sys, "_MEIPASS", HERE))  # bundled files when packaged
+SESSION_FILE = potd.DATA_DIR / "data" / "session.json"
 STATE_FILE = potd.DATA_DIR / "data" / "state.json"
 INDEX_HTML = RES / "web" / "index.html"
 
@@ -82,13 +83,19 @@ class Tracker(threading.Thread):
         super().__init__(daemon=True)
         self.lock = threading.RLock()
         self.cmds = queue.Queue()
-        self.chrome = potd.HiddenChrome()
+        self.signin = None
+        self.cookie = None
         self.state = self._load()
         self.status = {"phase": "starting", "message": "Starting…", "lastCheck": None,
                        "nextCheck": None, "progress": None}
         self.next_due = time.time()
         self.stopped = threading.Event()
-        self.auto_prompted = False  # open the sign-in page by itself once per run
+        self.auto_prompted = False  # open the sign-in window by itself once per run
+        if SESSION_FILE.exists():
+            try:
+                self.cookie = json.loads(SESSION_FILE.read_text()).get("potd")
+            except Exception:
+                pass
 
     # ---------- persistence
 
@@ -114,7 +121,7 @@ class Tracker(threading.Thread):
         with self.lock:
             self.status.update(kw)
 
-    # ---------- main loop (the only thread that touches Chrome)
+    # ---------- main loop (the only thread that polls potd.lol)
 
     def run(self):
         while not self.stopped.is_set():
@@ -126,25 +133,29 @@ class Tracker(threading.Thread):
                 if cmd == "quit":
                     break
                 if cmd == "login":
-                    self.set_status(phase="login", message="Sign in to potd.lol in the Chrome window, then click “I’m signed in”.")
-                    self.chrome.show(potd.BASE + "/sign-in")
+                    self.start_signin()
                     continue
-                elif cmd == "show":
-                    self.chrome.show()
+                if cmd == "login_cancel":
+                    if self.signin:
+                        self.signin.cancel()
                     continue
-                elif cmd == "hide":
-                    self.chrome.hide()
+                if cmd == "signed_in":
+                    self.set_status(phase="checking", message="Signed in. Checking leaderboards…")
+                    self.next_due = 0
+                if cmd == "signin_failed":
+                    self.set_status(phase="login_required", message="Sign in to your potd.lol account to start tracking.")
                     continue
-                # while waiting for the user to sign in, only check when asked
+                # while the sign-in window is open or needed, only check when asked
                 waiting = self.status["phase"] in ("login", "login_required")
-                if cmd in ("check", "login_done") or (not waiting and time.time() >= self.next_due):
-                    self.check(after_login=(cmd == "login_done"))
+                if cmd == "check" or (not waiting and time.time() >= self.next_due):
+                    self.check()
             except Exception as ex:  # keep the loop alive whatever happens
                 print("tracker error:", repr(ex), file=sys.stderr)
-                self.chrome.close()
                 self.set_status(phase="error", message=f"Something went wrong: {ex}. Retrying soon.")
                 self._schedule()
-        self.chrome.close()
+        if self.signin:
+            self.signin.cancel()
+            self.signin.join(timeout=10)
         self.stopped.set()
 
     def _schedule(self):
@@ -152,30 +163,45 @@ class Tracker(threading.Thread):
         self.next_due = time.time() + minutes * 60
         self.set_status(nextCheck=iso(now_utc() + timedelta(minutes=minutes)))
 
-    def check(self, after_login=False):
+    def start_signin(self):
+        if self.signin and self.signin.is_alive():
+            return
+        self.set_status(phase="login", progress=None,
+                        message="Sign in to potd.lol in the Chrome window that just opened.")
+
+        def done(cookie):
+            if cookie:
+                self.cookie = cookie
+                SESSION_FILE.parent.mkdir(exist_ok=True)
+                SESSION_FILE.write_text(json.dumps({"potd": cookie}))
+                self.cmds.put("signed_in")
+            else:
+                self.cmds.put("signin_failed")
+        self.signin = potd.SignIn(done)
+        self.signin.start()
+
+    def check(self):
         self.set_status(phase="checking", message="Checking leaderboards…", progress=None)
-        page = self.chrome.ensure()
         try:
-            users = potd.fetch_leaderboards(page)
+            if not self.cookie:
+                raise LoginRequired()
+            users = potd.fetch_leaderboards(self.cookie)
         except LoginRequired:
             self.set_status(phase="login_required", progress=None,
                             message="Sign in to your potd.lol account to start tracking.")
-            if not self.auto_prompted and not after_login:
-                # first run (or expired login): bring up the sign-in page right away
+            if not self.auto_prompted:
+                # first run (or expired login): open the sign-in window right away
                 self.auto_prompted = True
                 self.cmds.put("login")
-                return
-            if after_login:
-                self.set_status(phase="login", message="Still not signed in. Finish signing in in Chrome, then click “I’m signed in”.")
+            else:
+                notify("POTD Tracker", "Sign-in expired. Open the tracker and sign in again.")
             return
         except NoData as ex:
             self.set_status(phase="attention", progress=None,
-                            message="potd.lol didn’t load (it may be showing a human check). Click Show browser to look.")
+                            message="potd.lol didn’t answer. Retrying soon.")
             print("no data:", ex, file=sys.stderr)
             self._schedule()
             return
-        if after_login:
-            self.chrome.hide()
 
         with self.lock:
             self.state["leaderboard"] = users
@@ -201,10 +227,16 @@ class Tracker(threading.Thread):
             self.set_status(message=f"Reading {u.get('displayName') or u['username']}…", progress=[i, len(to_visit)])
             time.sleep(random.uniform(*PAUSE_RANGE))
             try:
-                fetched = potd.fetch_picks(page, u)
+                fetched = potd.fetch_picks(self.cookie, u)
             except NoData as ex:
                 print("skip:", ex, file=sys.stderr)
                 continue
+            except LoginRequired:
+                self.cookie = None
+                self.set_status(phase="login_required", progress=None,
+                                message="Your potd.lol sign-in expired. Sign in again.")
+                self.auto_prompted = False
+                return
             with self.lock:
                 first_scan = u["uniqueId"] not in self.state["users"]
                 for p in fetched:
@@ -372,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
             TRACKER.update_settings(body)
         elif self.path == "/api/update_apply":
             return self._send(200, updater.apply(shutdown))
-        elif self.path in ("/api/check", "/api/login", "/api/login_done", "/api/show", "/api/hide"):
+        elif self.path in ("/api/check", "/api/login", "/api/login_cancel"):
             TRACKER.cmds.put(self.path.rsplit("/", 1)[1])
         elif self.path == "/api/quit":
             self._send(200, {"ok": True})

@@ -12,9 +12,8 @@ press **Quit** on the page to stop.
 
 ## How it works
 
-- potd.lol only serves its data to its own site in a real, signed-in browser, so the app
-  runs your Google Chrome with a separate profile (`.potd-chrome/`), minimized, and reads
-  the data the leaderboard and profile pages load.
+- Data is read over plain HTTPS with your own potd.lol session cookie: no background browser.
+  Each user signs in with their own potd.lol account (saved in `data/session.json`).
 - Every few minutes (Settings → "Check every") it reloads both leaderboards. A
   handicapper's profile is opened only when their last-pick time changed, or to pick up the
   result of a bet that has started.
@@ -31,9 +30,9 @@ press **Quit** on the page to stop.
 
 ## Sign-in
 
-The potd.lol login lasts about two weeks. When it expires the page shows a **Sign in**
-button: Chrome comes to the front on the sign-in page, you sign in (including the human
-check), then click **I'm signed in** and Chrome hides again.
+On first run (and when the login expires, about every two weeks) a sign-in window opens in
+the app. It launches Google Chrome on the potd.lol sign-in page, because the site's human
+check only works in a real browser. Sign in; the window closes by itself and tracking starts.
 
 ## Files
 

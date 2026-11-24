@@ -102,6 +102,10 @@ dialog.closing::backdrop{animation:fade-out 160ms ease-in forwards}
 @keyframes dlg-out{to{opacity:0;transform:scale(.96)}}
 @keyframes fade-in{from{opacity:0}}
 @keyframes fade-out{to{opacity:0}}
+.signin{padding:.5rem 1.25rem 1.25rem;font-size:.875rem}
+.signin p{margin:.25rem 0 .75rem;color:var(--muted)}
+.signin ol{margin:0 0 1.25rem;padding-left:1.25rem;display:grid;gap:.4rem}
+.signin-actions{display:flex;gap:.5rem;justify-content:flex-end}
 dialog.wide{width:min(58rem,calc(100vw - 2rem))}
 .tracked-body{overflow-x:auto;max-height:70vh;overflow-y:auto;padding:.5rem 0 .75rem}
 .dlg-head{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.25rem .25rem}
@@ -142,7 +146,7 @@ footer{color:var(--muted);font-size:.75rem;margin-top:3rem}
     </svg>
   </button>
   <button class="btn plain" id="updateBtn" title="Check for a newer version">Get updates</button>
-  <button class="btn plain" id="quitBtn" title="Stop tracking and close the hidden Chrome">Quit</button>
+  <button class="btn plain" id="quitBtn" title="Stop tracking">Quit</button>
 </div></header>
 
 <dialog id="settingsDlg" aria-labelledby="settingsTitle">
@@ -157,6 +161,19 @@ footer{color:var(--muted);font-size:.75rem;margin-top:3rem}
   </form>
 </dialog>
 
+<dialog id="signinDlg" aria-labelledby="signinTitle">
+  <div class="dlg-head"><h2 id="signinTitle">Sign in to potd.lol</h2></div>
+  <div class="signin">
+    <p id="signinText"></p>
+    <ol>
+      <li>Sign in with <b>your own</b> potd.lol account in the Chrome window that opens.</li>
+      <li>Complete the human check, if shown.</li>
+      <li>This window closes by itself once you’re in.</li>
+    </ol>
+    <div class="signin-actions"><button class="btn" id="signinLater">Not now</button><button class="btn primary" id="signinGo">Open sign-in window</button></div>
+  </div>
+</dialog>
+
 <dialog id="trackedDlg" class="wide" aria-labelledby="trackedTitle">
   <div class="dlg-head"><h2 id="trackedTitle">Tracked handicappers <small id="trackedCount"></small></h2><button class="btn plain" id="trackedDone">Done</button></div>
   <div class="tracked-body" id="tracked"></div>
@@ -168,7 +185,7 @@ footer{color:var(--muted);font-size:.75rem;margin-top:3rem}
   <h2>Bets to place <small id="todoCount"></small></h2>
   <div id="todo"></div>
 
-  <footer>Data from potd.lol, read through a minimized Chrome window. Mirrors other people’s picks. Not betting advice; only stake what you can afford to lose.</footer>
+  <footer>Data from potd.lol, read with your own potd.lol account. Mirrors other people’s picks. Not betting advice; only stake what you can afford to lose.</footer>
 </main>
 
 <script>
@@ -276,14 +293,30 @@ function renderStatus() {
   let b = "";
   if (st.phase === "login_required")
     b = `<div class="banner bad"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="login">Sign in</button></div>`;
-  else if (st.phase === "login")
-    b = `<div class="banner"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="login_done">I’m signed in</button><button class="btn" data-cmd="show">Show Chrome</button></div>`;
   else if (st.phase === "attention")
-    b = `<div class="banner"><p>${esc(st.message)}</p><button class="btn" data-cmd="show">Show browser</button><button class="btn" data-cmd="hide">Hide it</button><button class="btn primary" data-cmd="check">Retry</button></div>`;
+    b = `<div class="banner"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="check">Retry</button></div>`;
   else if (st.phase === "error")
     b = `<div class="banner bad"><p>${esc(st.message)}</p><button class="btn primary" data-cmd="check">Retry now</button></div>`;
   if ($("banner").innerHTML !== b) $("banner").innerHTML = b;
+  renderSignin(st);
 }
+
+// sign-in modal: opens by itself whenever a sign-in is needed
+let signinDismissed = false;
+function renderSignin(st) {
+  const need = st.phase === "login_required" || st.phase === "login";
+  const d = $("signinDlg"), waiting = st.phase === "login";
+  if (!need) { signinDismissed = false; if (d.open) closeSignin(); return; }
+  $("signinText").textContent = waiting ? "Waiting for you to finish signing in…" : st.message;
+  $("signinGo").hidden = waiting;
+  $("signinLater").textContent = waiting ? "Cancel" : "Not now";
+  if (!d.open && !signinDismissed) d.showModal();
+}
+$("signinGo").onclick = () => api("/api/login", {}).then(apply);
+$("signinLater").onclick = () => {
+  if (data.status.phase === "login") api("/api/login_cancel", {}).then(apply);
+  signinDismissed = true; closeSignin();
+};
 
 function fillSettings(force) {
   if (!force && $("settingsDlg").open) return;  // never overwrite what the user is editing
@@ -337,7 +370,7 @@ $("updateBtn").onclick = async () => {
   reset();
 };
 $("quitBtn").onclick = async () => {
-  if (!confirm("Stop tracking? The hidden Chrome window closes too.")) return;
+  if (!confirm("Stop tracking?")) return;
   await api("/api/quit", {}).catch(() => {});
   document.body.innerHTML = '<main><h2>POTD Tracker stopped.</h2><p class="meta">Start it again with the “POTD Tracker.command” file.</p></main>';
 };
@@ -345,20 +378,21 @@ $("quitBtn").onclick = async () => {
 // settings modal: scale/fade in, same path out; Esc, Done or a click outside closes it
 function wireDialog(dlg, openBtn, doneBtn, onOpen) {
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
-openBtn.onclick = () => { if (onOpen) onOpen(); dlg.showModal(); };
+if (openBtn) openBtn.onclick = () => { if (onOpen) onOpen(); dlg.showModal(); };
 function closeDlg() {
   if (!dlg.open || dlg.classList.contains("closing")) return;
   if (reduceMotion.matches) return dlg.close();
   dlg.classList.add("closing");
   dlg.addEventListener("animationend", () => { dlg.classList.remove("closing"); dlg.close(); }, {once: true});
 }
-doneBtn.onclick = closeDlg;
-dlg.addEventListener("cancel", e => { e.preventDefault(); closeDlg(); });
-dlg.addEventListener("click", e => { if (e.target === dlg) closeDlg(); });
+if (doneBtn) doneBtn.onclick = closeDlg;
+dlg.addEventListener("cancel", e => { e.preventDefault(); if (dlg.id === "signinDlg") signinDismissed = true; closeDlg(); });
+if (dlg.id !== "signinDlg") dlg.addEventListener("click", e => { if (e.target === dlg) closeDlg(); });
 return closeDlg;
 }
 const dlg = $("settingsDlg");
 const closeSettings = wireDialog(dlg, $("settingsBtn"), $("settingsDone"), () => fillSettings(true));
+const closeSignin = wireDialog($("signinDlg"), null, null);
 wireDialog($("trackedDlg"), $("trackedBtn"), $("trackedDone"));
 $("settings").addEventListener("submit", e => { e.preventDefault(); closeSettings(); });
 
