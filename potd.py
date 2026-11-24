@@ -2,8 +2,9 @@
 Core POTD.LOL access: readers for the leaderboard and handicapper data, plus
 the sign-in helper.
 
-Data is read over plain HTTPS with the user's own session cookie. Chrome is only
-opened (visibly) for signing in, because the sign-in page has a human check.
+Leaderboards are read over plain HTTPS with the user's own session cookie. Handicapper
+picks are read through a minimized Chrome that only runs while a check needs it. Chrome
+is opened visibly for signing in, because the sign-in page has a human check.
 """
 import json
 import os
@@ -29,7 +30,9 @@ if FROZEN and IS_WIN:
     DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "POTDTracker"
 else:
     DATA_DIR = HERE
-CHROME_PROFILE = DATA_DIR / ".potd-chrome"
+CHROME_PROFILE = DATA_DIR / ".potd-chrome"          # sign-in window (deleted after)
+BG_PROFILE = DATA_DIR / ".potd-chrome-bg"          # hidden Chrome that reads picks
+BG_PORT = 9334
 CHROME_APP = "Google Chrome"
 DEBUG_PORT = 9333
 
@@ -58,9 +61,9 @@ def ident(u):
 
 # ---------------------------------------------------------------- Chrome
 
-def _port_open():
+def _port_open(port=DEBUG_PORT):
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json/version", timeout=1)
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1)
         return True
     except Exception:
         return False
@@ -142,6 +145,120 @@ class SignIn(threading.Thread):
             self.on_done(cookie)
 
 
+# ---------------------------------------------------------------- hidden Chrome (picks only)
+# Handicapper pages only return their picks to potd.lol's own web page, so they
+# are read by loading that page in a minimized Chrome signed in with the user's cookie.
+
+class HiddenChrome:
+    """One Chrome instance with the POTD profile, kept minimized."""
+
+    def __init__(self, cookie=None):
+        self.cookie = cookie
+        self._pw = None
+        self._browser = None
+        self.page = None
+        self.launched_by_us = False
+
+    def ensure(self):
+        if self.page and not self.page.is_closed() and self._browser.is_connected():
+            return self.page
+        self._disconnect()
+        if not _port_open(BG_PORT):
+            # `open -g` starts Chrome without bringing it to the front;
+            # the window starts off-screen and is minimized right after.
+            flags = [
+                f"--user-data-dir={BG_PROFILE}",
+                f"--remote-debugging-port={BG_PORT}",
+                "--no-first-run", "--no-default-browser-check",
+                "--window-position=-3000,-3000", "--window-size=1100,850",
+                # keep pages working normally while minimized
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "about:blank",
+            ]
+            if IS_MAC:
+                subprocess.run(["open", "-g", "-n", "-a", CHROME_APP, "--args", *flags], check=True)
+            else:
+                subprocess.Popen([_chrome_exe(), *flags])
+            for _ in range(60):
+                if _port_open(BG_PORT):
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("Chrome did not start")
+            self.launched_by_us = True
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{BG_PORT}", timeout=20000)
+        ctx = self._browser.contexts[0]
+        if self.cookie:
+            ctx.add_cookies([{"name": SESSION_COOKIE, "value": self.cookie, "domain": "www.potd.lol",
+                              "path": "/", "secure": True, "httpOnly": True}])
+        self.page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        self.hide()
+        return self.page
+
+    def _window(self):
+        cdp = self.page.context.new_cdp_session(self.page)
+        return cdp, cdp.send("Browser.getWindowForTarget")["windowId"]
+
+    def hide(self):
+        cdp, wid = self._window()
+        cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {"windowState": "minimized"}})
+
+    def close(self):
+        if self._browser and self._browser.is_connected():
+            try:
+                self._browser.new_browser_cdp_session().send("Browser.close")
+            except Exception:
+                pass
+        self._disconnect()
+
+    def _disconnect(self):
+        try:
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
+        self._pw = self._browser = self.page = None
+
+
+def load_page_data(page, url, matchers, timeout=30):
+    """Navigate to url and return {name: (status, json)} for API responses the
+    page itself loads. matchers: {name: fn(response_url) -> bool}. The first
+    matcher is required; the rest are best effort."""
+    seen = {}
+
+    def on_response(r):
+        for name, fn in matchers.items():
+            if name not in seen and fn(r.url):
+                seen[name] = r
+
+    page.on("response", on_response)
+    try:
+        page.goto(url, wait_until="commit", timeout=timeout * 1000)
+        required = next(iter(matchers))
+        deadline = time.time() + timeout
+        while required not in seen and time.time() < deadline:
+            page.wait_for_timeout(250)
+        if required not in seen:
+            raise NoData(f"No data loaded from {url}")
+        grace = time.time() + 1.5
+        while len(seen) < len(matchers) and time.time() < grace:
+            page.wait_for_timeout(250)
+        out = {}
+        for name, r in seen.items():
+            try:
+                body = r.json()
+            except Exception:
+                body = None
+            out[name] = (r.status, body)
+        return out
+    finally:
+        page.remove_listener("response", on_response)
+
+
 # ---------------------------------------------------------------- HTTP
 
 SESSION_COOKIE = "_potd"
@@ -221,18 +338,20 @@ def _normalize_pick(row, user, unreviewed=False):
     }
 
 
-def fetch_picks(cookie, user):
+def fetch_picks(page, user):
     """Latest 50 picks plus any awaiting admin review."""
     i = ident(user)
-    status, body = api_get(f"/handicapper/{i}?startRow=0&endRow=50", cookie)
+    data = load_page_data(page, f"{BASE}/handicapper/{i}", {
+        "picks": lambda u: f"/api/handicapper/{i}?" in u,
+        "awaiting": lambda u: u.endswith(f"/api/handicapper/{i}/awaiting-review"),
+    })
+    status, body = data["picks"]
     if status == 401:
         raise LoginRequired()
-    if status != 200:
-        raise NoData(f"Profile {i}: HTTP {status}")
     picks = []
     if isinstance(body, dict):
         picks += [_normalize_pick(r, user) for r in body.get("rows") or []]
-    aw = api_get(f"/handicapper/{i}/awaiting-review", cookie)[1]
+    aw = data.get("awaiting", (None, None))[1]
     if isinstance(aw, list):
         picks += [_normalize_pick(r, user, unreviewed=True) for r in aw]
     return picks

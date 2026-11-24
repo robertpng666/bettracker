@@ -221,38 +221,44 @@ class Tracker(threading.Thread):
                     to_visit.append(u)
 
         new_picks = []
-        for i, u in enumerate(to_visit, 1):
-            if self.stopped.is_set() or not self.cmds.empty():
-                break  # pick up user commands; the rest is checked next round
-            self.set_status(message=f"Reading {u.get('displayName') or u['username']}…", progress=[i, len(to_visit)])
-            time.sleep(random.uniform(*PAUSE_RANGE))
-            try:
-                fetched = potd.fetch_picks(self.cookie, u)
-            except NoData as ex:
-                print("skip:", ex, file=sys.stderr)
-                continue
-            except LoginRequired:
-                self.cookie = None
-                self.set_status(phase="login_required", progress=None,
-                                message="Your potd.lol sign-in expired. Sign in again.")
-                self.auto_prompted = False
-                return
-            with self.lock:
-                first_scan = u["uniqueId"] not in self.state["users"]
-                for p in fetched:
-                    prev = self.state["picks"].get(p["id"])
-                    if prev:
-                        p["firstSeen"] = prev["firstSeen"]
-                        p["live"] = prev.get("live", False)
-                    else:
-                        p["firstSeen"] = iso(now_utc())
-                        p["live"] = not first_scan
-                        if p["live"] and p["status"] in ("pending", "unreviewed"):
-                            new_picks.append(p)
-                    self.state["picks"][p["id"]] = p
-                self.state["users"][u["uniqueId"]] = {"lastPickAt": u.get("lastPickAt"),
-                                                      "lastVisited": iso(now_utc())}
-            self.save()
+        chrome = potd.HiddenChrome(self.cookie) if to_visit else None
+        try:
+            page = chrome.ensure() if chrome else None
+            for i, u in enumerate(to_visit, 1):
+                if self.stopped.is_set() or not self.cmds.empty():
+                    break  # pick up user commands; the rest is checked next round
+                self.set_status(message=f"Reading {u.get('displayName') or u['username']}…", progress=[i, len(to_visit)])
+                time.sleep(random.uniform(*PAUSE_RANGE))
+                try:
+                    fetched = potd.fetch_picks(page, u)
+                except NoData as ex:
+                    print("skip:", ex, file=sys.stderr)
+                    continue
+                except LoginRequired:
+                    self.cookie = None
+                    self.set_status(phase="login_required", progress=None,
+                                    message="Your potd.lol sign-in expired. Sign in again.")
+                    self.auto_prompted = False
+                    return
+                with self.lock:
+                    first_scan = u["uniqueId"] not in self.state["users"]
+                    for p in fetched:
+                        prev = self.state["picks"].get(p["id"])
+                        if prev:
+                            p["firstSeen"] = prev["firstSeen"]
+                            p["live"] = prev.get("live", False)
+                        else:
+                            p["firstSeen"] = iso(now_utc())
+                            p["live"] = not first_scan
+                            if p["live"] and p["status"] in ("pending", "unreviewed"):
+                                new_picks.append(p)
+                        self.state["picks"][p["id"]] = p
+                    self.state["users"][u["uniqueId"]] = {"lastPickAt": u.get("lastPickAt"),
+                                                          "lastVisited": iso(now_utc())}
+                self.save()
+        finally:
+            if chrome:
+                chrome.close()
 
         self.save()
         if new_picks:
