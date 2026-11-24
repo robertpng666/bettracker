@@ -150,7 +150,7 @@ class Tracker(threading.Thread):
                 if cmd == "check" or (not waiting and time.time() >= self.next_due):
                     self.check()
             except Exception as ex:  # keep the loop alive whatever happens
-                print("tracker error:", repr(ex), file=sys.stderr)
+                potd.log("tracker error:", repr(ex))
                 self.set_status(phase="error", message=f"Something went wrong: {ex}. Retrying soon.")
                 self._schedule()
         if self.signin:
@@ -199,7 +199,7 @@ class Tracker(threading.Thread):
         except NoData as ex:
             self.set_status(phase="attention", progress=None,
                             message="potd.lol didn’t answer. Retrying soon.")
-            print("no data:", ex, file=sys.stderr)
+            potd.log("no data:", ex)
             self._schedule()
             return
 
@@ -221,6 +221,7 @@ class Tracker(threading.Thread):
                     to_visit.append(u)
 
         new_picks = []
+        failed = []
         chrome = potd.HiddenChrome(self.cookie) if to_visit else None
         try:
             page = chrome.ensure() if chrome else None
@@ -232,7 +233,8 @@ class Tracker(threading.Thread):
                 try:
                     fetched = potd.fetch_picks(page, u)
                 except NoData as ex:
-                    print("skip:", ex, file=sys.stderr)
+                    potd.log("skip", u["username"], ex)
+                    failed.append(str(ex))
                     continue
                 except LoginRequired:
                     self.cookie = None
@@ -261,6 +263,12 @@ class Tracker(threading.Thread):
                 chrome.close()
 
         self.save()
+        if failed and len(failed) == len(to_visit):
+            self.set_status(phase="attention", progress=None, lastCheck=iso(now_utc()),
+                            message=f"Couldn’t read any handicapper’s picks ({len(failed)} failed). {failed[0][:240]}")
+            potd.log("all picks failed:", failed[0])
+            self._schedule()
+            return
         if new_picks:
             names = ", ".join(sorted({p["handicapper"] for p in new_picks}))
             notify("New POTD picks", f"{len(new_picks)} new: {names}")

@@ -30,6 +30,7 @@ if FROZEN and IS_WIN:
     DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "POTDTracker"
 else:
     DATA_DIR = HERE
+LOG_FILE = DATA_DIR / "data" / "tracker.log"
 CHROME_PROFILE = DATA_DIR / ".potd-chrome"          # sign-in window (deleted after)
 BG_PROFILE = DATA_DIR / ".potd-chrome-bg"          # hidden Chrome that reads picks
 BG_PORT = 9334
@@ -49,6 +50,18 @@ class LoginRequired(Exception):
 
 class NoData(Exception):
     """The page did not load its data (Cloudflare check, site down, ...)."""
+
+
+def log(*a):
+    """Append to data/tracker.log (the packaged app has no console)."""
+    try:
+        LOG_FILE.parent.mkdir(exist_ok=True)
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 500_000:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".old"))
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S ") + " ".join(str(x) for x in a) + "\n")
+    except Exception:
+        pass
 
 
 def to_dt(s):
@@ -134,7 +147,7 @@ class SignIn(threading.Thread):
                 except Exception:
                     pass
         except Exception as ex:
-            print("sign-in error:", repr(ex), file=sys.stderr)
+            log("sign-in error:", repr(ex))
         finally:
             try:
                 if pw:
@@ -243,7 +256,11 @@ def load_page_data(page, url, matchers, timeout=30):
         while required not in seen and time.time() < deadline:
             page.wait_for_timeout(250)
         if required not in seen:
-            raise NoData(f"No data loaded from {url}")
+            try:
+                where = f"page “{page.title()[:60]}” at {page.url[:80]}"
+            except Exception:
+                where = "page not readable"
+            raise NoData(f"No data loaded from {url} ({where})")
         grace = time.time() + 1.5
         while len(seen) < len(matchers) and time.time() < grace:
             page.wait_for_timeout(250)
